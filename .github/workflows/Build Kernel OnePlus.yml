@@ -117,8 +117,8 @@ on:
       LSM:
         type: boolean
         description: "是否启用关键分区写入保护模块(BBG)？"
-        required: true
-        default: true
+        required: false
+        default: false
       NETFILTER:
         type: boolean
         description: "是否启用网络功能拓展(NETFILTER)？"
