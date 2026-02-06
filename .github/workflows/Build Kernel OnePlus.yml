@@ -50,8 +50,11 @@ on:
           - oneplus_pad2_mt6991_b
           - oneplus_ace_6
           - oneplus_ace_6t
+          - oneplus_ace_6t_aoap
           - oneplus_15r
+          - oneplus_15r_aosp
           - oneplus_15
+          - oneplus_15_aosp
       MANAGER_SOURCE:
         type: choice
         description: "管理器调用方向"
@@ -154,6 +157,11 @@ on:
         description: "是否拉取SUSFS-DEV分支？"
         required: true
         default: false
+      AOSP:
+        type: boolean
+        description: "是否切换到AOSP源？"
+        required: true
+        default: false
       SPACE_NOCLEAN:
         type: boolean
         description: "是否停用空间清扫？"
@@ -167,7 +175,7 @@ on:
 
 jobs:
   build:
-    name: ${{ github.event.inputs.FAST_BUILD == 'true' && ' [FAST]' || '' }}${{ github.event.inputs.KPM == 'KPM' && ' [KPM]' || github.event.inputs.KPM == 'KPN' && ' [KPN]' || '' }}${{ github.event.inputs.LSM == 'true' && ' [LSM]' || '' }}${{ github.event.inputs.SCHED == 'true' && ' [SCHED]' || '' }}${{ github.event.inputs.ZRAM == 'true' && ' [ZRAM]' || '' }}For ${{ github.event.inputs.FILE }} ${{ github.event.inputs.SUFFIX }}
+    name: ${{ github.event.inputs.FAST_BUILD == 'true' && ' [FAST]' || '' }}${{ github.event.inputs.AOSP == 'true' && ' [AOSP]' || '' }}${{ github.event.inputs.KPM == 'KPM' && ' [KPM]' || github.event.inputs.KPM == 'KPN' && ' [KPN]' || '' }}${{ github.event.inputs.LSM == 'true' && ' [LSM]' || '' }}${{ github.event.inputs.SCHED == 'true' && ' [SCHED]' || '' }}${{ github.event.inputs.ZRAM == 'true' && ' [ZRAM]' || '' }}For ${{ github.event.inputs.FILE }} ${{ github.event.inputs.SUFFIX }}
     runs-on: ubuntu-latest
     env:
       CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
@@ -201,7 +209,7 @@ jobs:
           else
             FILE_CONF="$FILE"
           fi
-          FILE_BASE=$(echo "$FILE_CONF" | sed -E 's/_([a-zA-Z0-9])/\U\1/g; s/^oneplus/OnePlus/; s/^realme/Realme/; s/^oppo/Oppo/')
+          FILE_BASE=$(echo "$FILE_CONF" | sed -E 's/_aosp/(AOSP)/g; s/_([a-zA-Z0-9])/\U\1/g; s/^oneplus/OnePlus/; s/^realme/RealME/; s/^oppo/OPPO/')
           mkdir -p ".repo/manifests_fallback"
           XML_PATH=".repo/manifests_fallback/${FILE}.xml"
           README_PATH=".repo/manifests_fallback/README.md"
@@ -357,7 +365,7 @@ jobs:
       - name: Install Dependencies + APTC
         uses: awalsh128/cache-apt-pkgs-action@latest 
         with: 
-          packages: python3 git curl ccache libelf-dev build-essential flex bison libssl-dev libncurses-dev liblz4-tool zlib1g-dev libxml2-utils rsync unzip gawk dos2unix
+          packages: python3 git curl ccache libelf-dev build-essential flex bison libssl-dev libncurses-dev liblz4-tool zlib1g-dev libxml2-utils rsync unzip gawk dos2unix kmod libdw-dev elfutils
           execute_install_scripts: true
 
       - name: Restore Ccache
@@ -937,6 +945,10 @@ jobs:
           if [ "$KERNEL_VERSION" = "6.1" ] && [[ "$CPU" == mt* ]]; then
             echo "CONFIG_DEBUG_INFO_BTF=n" >> "$CONFIG_FILE"
           fi
+          if [[ "${{ github.event.inputs.AOSP }}" == "true" ]]; then
+            echo "CONFIG_ANDROID_BINDER_IPC_RUST=m" >> "$CONFIG_FILE"
+            echo "CONFIG_RUST=y" >> "$CONFIG_FILE"
+          fi
 
           # 移除构建审查
           sed -i 's/check_defconfig//' ./build.config.gki
@@ -1043,28 +1055,53 @@ jobs:
           # 获取 CLANG_PREBUILT_BIN 的上一级目录名，赋值给 CLANG_PATH
           CLANG_PATH=$(basename "$(dirname "$CLANG_PREBUILT_BIN")")
 
+          # 搜索 rustc
+          RUSTC_BIN=""
+          for base in prebuilts prebuilts-master; do
+            [ -d "$base/rust/linux-x86" ] || continue
+            latest=$(ls -d "$base/rust/linux-x86"/1.* 2>/dev/null | sort -V | tail -n1)
+            if [ -x "$latest/bin/rustc" ]; then
+              RUSTC_BIN="$(pwd)/$latest/bin/rustc"
+              break
+            fi
+          done
+
+          if [ -z "$RUSTC_BIN" ]; then
+            echo "⚠️ 未在 kernel_platform/prebuilts 中找到可用 rustc，使用默认值"
+            RUSTC_BIN="$(pwd)/prebuilts/rust/linux-x86/1.73.0b/bin/rustc"
+          fi
+
           echo "✅ CLANG_VERSION=$CLANG_VERSION"
           echo "✅ CLANG_DIR=$CLANG_DIR"
           echo "✅ CLANG_PATH=$CLANG_PATH"
           echo "✅ USE_LLVM_IAS=$USE_LLVM_IAS"
+          echo "✅ RUSTC=$RUSTC_BIN"
 
           export PATH="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$CLANG_PREBUILT_BIN:$PATH"
           export PATH="/usr/lib/ccache:$PATH"
           export CC="ccache clang"
+          export BINDGEN="bindgen"
           sudo apt install -y libelf-dev ccache
 
           cd ./common
-          MAKE_ARGS="LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
-            RUSTC=../../prebuilts/rust/linux-x86/1.73.0b/bin/rustc \
-            PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole \
-            LD=ld.lld HOSTLD=ld.lld KCFLAGS+=-Wno-error"
+          MAKE_ARGS=(
+            LLVM=1
+            ARCH=arm64
+            CROSS_COMPILE=aarch64-linux-gnu-
+            RUSTC=$RUSTC_BIN
+            PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole
+            LD=ld.lld
+            HOSTLD=ld.lld
+            KCFLAGS+=-Wno-error
+            KCFLAGS+=-D__ANDROID_COMMON_KERNEL__
+          )
 
           if [[ "$USE_LLVM_IAS" == "true" ]]; then
-            MAKE_ARGS="LLVM_IAS=1 $MAKE_ARGS"
+            MAKE_ARGS=(LLVM_IAS=1 "${MAKE_ARGS[@]}")
           fi
 
-          make -j$(nproc --all) O=out $MAKE_ARGS gki_defconfig
-          make -j$(nproc --all) O=out $MAKE_ARGS
+          make -j"$(nproc --all)" O=out "${MAKE_ARGS[@]}" gki_defconfig
+          make -j"$(nproc --all)" O=out "${MAKE_ARGS[@]}"
           ccache -s
 
       - name: Fallback to Build Kernel
