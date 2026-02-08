@@ -50,7 +50,7 @@ on:
           - oneplus_pad2_mt6991_b
           - oneplus_ace_6
           - oneplus_ace_6t
-          - oneplus_ace_6t_aoap
+          - oneplus_ace_6t_aosp
           - oneplus_15r
           - oneplus_15r_aosp
           - oneplus_15
@@ -217,60 +217,59 @@ jobs:
           echo "FILE_CONF=$FILE_CONF" >> $GITHUB_ENV
           echo "FILE_BASE=$FILE_BASE" >> $GITHUB_ENV
 
-          # 动态调用源码清单仓库，仓库优先级：1️⃣ OnePlusOSS → 2️⃣ Numbersf(可换)
+          # 动态调用源码清单仓库，仓库优先级：1️⃣ OnePlusOSS → 2️⃣ Appendix → 3️⃣ Dynamic
           DYNAMIC_REPO_INPUT="${{ github.event.inputs.DYNAMIC_REPO }}"
           declare -A REPOS
-          REPOS["OnePlusOSS"]="https://api.github.com/repos/OnePlusOSS/kernel_manifest"
-          REPOS["Dynamic"]="https://api.github.com/repos/${DYNAMIC_REPO_INPUT}/kernel_manifest"
+          REPOS["OnePlusOSS"]="OnePlusOSS|kernel_manifest"
+          REPOS["Appendix"]="Numbersf|Kernel_Manifest_Appendix"
+          REPOS["Dynamic"]="${DYNAMIC_REPO_INPUT}|kernel_manifest"
 
           FOUND_REPO=""
           FOUND_BRANCH=""
 
           check_repo() {
-            local OWNER=$1
-            local REPO_URL=$2
+            local ENTRY=$1
+            local OWNER=${ENTRY%%|*}
+            local REPO_NAME=${ENTRY##*|}
+            local API_URL="https://api.github.com/repos/${OWNER}/${REPO_NAME}"
 
-            echo "🌐 尝试拉取 ${OWNER} 分支列表..."
-            BRANCHES=$(curl -fsL ${REPO_URL}/branches | jq -r 'if type=="array" then .[].name else empty end' 2>/dev/null || true)
+            echo "🌐 尝试拉取 ${OWNER}/${REPO_NAME} 分支列表..."
+            BRANCHES=$(curl -fsL "$API_URL/branches" | jq -r 'if type=="array" then .[].name else empty end' 2>/dev/null || true)
+
             if [[ -z "$BRANCHES" ]]; then
-              echo "⚠️ ${OWNER} 分支列表获取失败，请尝试重新运行工作流。"
+              echo "⚠️ ${OWNER}/${REPO_NAME} 分支列表获取失败，请尝试重新运行工作流。"
               return 1
             fi
             for BRANCH in $BRANCHES; do
-              XML_URL="https://raw.githubusercontent.com/${OWNER}/kernel_manifest/$BRANCH/${FILE}.xml"
-              README_URL="https://raw.githubusercontent.com/${OWNER}/kernel_manifest/$BRANCH/README.md"
-              if curl -sf --head "$XML_URL" > /dev/null; then
-                echo "✅ 在 ${OWNER} 找到 ${FILE}.xml (分支: $BRANCH)"
+              XML_URL="https://raw.githubusercontent.com/${OWNER}/${REPO_NAME}/${BRANCH}/${FILE}.xml"
+              README_URL="https://raw.githubusercontent.com/${OWNER}/${REPO_NAME}/${BRANCH}/README.md"
+
+              if curl -sf --head "$XML_URL" >/dev/null; then
+                echo "✅ 在 ${OWNER}/${REPO_NAME} 找到 ${FILE}.xml(分支: ${BRANCH})"
                 curl -s -o "$XML_PATH" "$XML_URL"
                 curl -s -o "$README_PATH" "$README_URL" || true
+
                 FOUND_REPO="$OWNER"
+                FOUND_REPO_NAME="$REPO_NAME"
                 FOUND_BRANCH="$BRANCH"
+
                 return 0
               fi
             done
             return 1
           }
-
-          # 默认仓库寻找文件
-          if check_repo "OnePlusOSS" "${REPOS["OnePlusOSS"]}"; then
-            echo "MANIFEST_REPO=OnePlusOSS" >> $GITHUB_ENV
-            echo "MANIFEST_BRANCH=$FOUND_BRANCH" >> $GITHUB_ENV
-          fi
-
-          # 动态仓库寻找文件
-          if [[ -z "$FOUND_REPO" ]]; then
-            DYNAMIC_URL="${REPOS["Dynamic"]}"
-            DYNAMIC_OWNER=$(echo "$DYNAMIC_URL" | sed -E 's#https://api.github.com/repos/([^/]+)/.*#\1#')
-            if check_repo "$DYNAMIC_OWNER" "$DYNAMIC_URL"; then
-              echo "MANIFEST_REPO=$DYNAMIC_OWNER" >> $GITHUB_ENV
-              echo "MANIFEST_BRANCH=$FOUND_BRANCH" >> $GITHUB_ENV
+          if ! check_repo "${REPOS["OnePlusOSS"]}"; then
+            if ! check_repo "${REPOS["Appendix"]}"; then
+              check_repo "${REPOS["Dynamic"]}"
             fi
           fi
-
           if [[ -z "$FOUND_REPO" || ! -s "$XML_PATH" ]]; then
-            echo "❌ 无法在动态仓库中找到 ${FILE}.xml"
-            exit 1
+            echo "❌ 无法在任何仓库中找到 ${FILE}.xml"
+            exit 9
           fi
+          echo "MANIFEST_REPO=$FOUND_REPO" >> "$GITHUB_ENV"
+          echo "MANIFEST_REPO_NAME=$FOUND_REPO_NAME" >> "$GITHUB_ENV"
+          echo "MANIFEST_BRANCH=$FOUND_BRANCH" >> "$GITHUB_ENV"
 
           # 解析 revision 字符串
           REVISION=$(grep -oP '<project[^>]+revision="\K[^"]+' "$XML_PATH" | head -n1 || true)
@@ -305,6 +304,37 @@ jobs:
           else
             echo "❌ README.md 下载失败或为空"
           fi
+
+          echo "解析 FILE-K 获取 PATH_2..."
+          PATH_2=""
+          if [[ "$CPU" == sm* ]]; then
+            COUNT_SM=0
+            COUNT_MASTER=0
+            while read -r LINE; do
+              REV=$(echo "$LINE" | grep -oP 'revision="\K[^"]+' || true)
+              PATH_VAL=$(echo "$LINE" | grep -oP 'path="\K[^"]+' || true)
+              if [[ "$REV" =~ ^(oneplus|oppo)/ ]] && [[ -n "$PATH_VAL" ]]; then
+                COUNT_SM=$((COUNT_SM + 1))
+                if [[ $COUNT_SM -eq 2 ]]; then
+                  PATH_2="${PATH_VAL#kernel_platform/}"
+                  break
+                fi
+              elif [[ "$REV" == "master" ]] && [[ -n "$PATH_VAL" ]]; then
+                COUNT_MASTER=$((COUNT_MASTER + 1))
+                if [[ $COUNT_MASTER -eq 2 ]]; then
+                  PATH_2="${PATH_VAL#kernel_platform/}"
+                  break
+                fi
+              fi
+            done < <(grep "<project " "$XML_PATH" || true)
+          fi
+          if [[ -n "$PATH_2" ]]; then
+            echo "✅ PATH_2=$PATH_2"
+            echo "PATH_2=$PATH_2" >> "$GITHUB_ENV"
+          else
+            echo "⚠️ 未找到符合条件的 PATH_2，可能是天玑或不符合的特殊清单，跳过"
+          fi
+
           # 传递组合信息
           echo "value=${FILE_BASE}_Android${ANDROID_VERSION}" >> "$GITHUB_OUTPUT"
 
@@ -407,16 +437,9 @@ jobs:
           mkdir kernel_workspace && cd kernel_workspace
           mkdir -p .repo/manifests
           cp "$GITHUB_WORKSPACE/.repo/manifests_fallback/${FILE}.xml" ".repo/manifests/${FILE}.xml"
+          BASE_URL="https://github.com/${MANIFEST_REPO}/${MANIFEST_REPO_NAME}.git"
 
-          MANIFEST_REPO="${{ env.MANIFEST_REPO }}"
-          MANIFEST_BRANCH="${{ env.MANIFEST_BRANCH }}"
-          CPU="${{ env.CPU }}"
-          echo "MANIFEST_REPO=$MANIFEST_REPO"
-          echo "MANIFEST_BRANCH=$MANIFEST_BRANCH"
-
-          BASE_URL="https://github.com/${MANIFEST_REPO}/kernel_manifest.git"
-
-          echo "使用 $MANIFEST_REPO 的分支 $MANIFEST_BRANCH 初始化仓库..."
+          echo "使用$MANIFEST_REPO/$MANIFEST_REPO_NAME($MANIFEST_BRANCH)初始化仓库..."
           repo init -u "$BASE_URL" -b "$MANIFEST_BRANCH" -m "${FILE}.xml" --depth=1 --no-clone-bundle --no-tags
           repo sync -c -j$(nproc) --no-clone-bundle --no-tags --force-sync
 
@@ -437,12 +460,14 @@ jobs:
               [ -n "$BRANCH" ] && break
             fi
           done
-
+          if [[ -z "$BRANCH" && -n "$PATH_2" ]]; then
+            BRANCH=$(sed -n '2p' "./$PATH_2/android/ACK_SHA" | awk -F'-' '{print $1"-"$2}')
+          fi
           if [ -n "$BRANCH" ]; then
             echo "KANDROID_VERSION=${BRANCH%-*}" >> $GITHUB_ENV
             echo "KERNEL_VERSION=${BRANCH#*-}" >> $GITHUB_ENV
           else
-            echo "No BRANCH found in build.config files"
+            echo "No BRANCH found in build.config* and ACK_SHA files"
           fi
 
           # 从 Makefile 获取完整内核版本号(TKERNEL_VERSION)以及可选的修改内核等级
@@ -1023,7 +1048,12 @@ jobs:
           fi
 
           # 从 build.config.common 读取 CLANG_PREBUILT_BIN
-          CLANG_PREBUILT_BIN=$(grep '^CLANG_PREBUILT_BIN=' ./common/build.config.common | cut -d'=' -f2 || true)
+          CLANG_PREBUILT_BIN=""
+          for f in ./common/build.config.common ./"$PATH_2"/build.config.common; do
+            [[ -f "$f" ]] || continue
+            CLANG_PREBUILT_BIN=$(grep '^CLANG_PREBUILT_BIN=' "$f" | cut -d'=' -f2)
+            [[ -n "$CLANG_PREBUILT_BIN" ]] && break
+          done
           if [[ -z "$CLANG_PREBUILT_BIN" ]]; then
             echo "⚠️ CLANG_PREBUILT_BIN 未在 build.config.common 中找到，回退至官方构建脚本"
             echo "fallback=true" >> "$GITHUB_OUTPUT"
@@ -1055,27 +1085,22 @@ jobs:
           # 获取 CLANG_PREBUILT_BIN 的上一级目录名，赋值给 CLANG_PATH
           CLANG_PATH=$(basename "$(dirname "$CLANG_PREBUILT_BIN")")
 
-          # 搜索 rustc
-          RUSTC_BIN=""
-          for base in prebuilts prebuilts-master; do
-            [ -d "$base/rust/linux-x86" ] || continue
-            latest=$(ls -d "$base/rust/linux-x86"/1.* 2>/dev/null | sort -V | tail -n1)
-            if [ -x "$latest/bin/rustc" ]; then
-              RUSTC_BIN="$(pwd)/$latest/bin/rustc"
-              break
+          # 从 build.config.constants 读取 RUSTC_VERSION
+          RUSTC_VERSION="1.73.0b"
+          if [[ -f ./common/build.config.constants ]]; then
+            RUSTC_NEW_VERSION=$(grep '^RUSTC_VERSION=' ./common/build.config.constants | cut -d'=' -f2 || true)
+            if [[ -n "$RUSTC_NEW_VERSION" ]]; then
+              RUSTC_VERSION="$RUSTC_NEW_VERSION"
             fi
-          done
-
-          if [ -z "$RUSTC_BIN" ]; then
-            echo "⚠️ 未在 kernel_platform/prebuilts 中找到可用 rustc，使用默认值"
-            RUSTC_BIN="$(pwd)/prebuilts/rust/linux-x86/1.73.0b/bin/rustc"
           fi
 
+          echo "----------------"
           echo "✅ CLANG_VERSION=$CLANG_VERSION"
           echo "✅ CLANG_DIR=$CLANG_DIR"
           echo "✅ CLANG_PATH=$CLANG_PATH"
           echo "✅ USE_LLVM_IAS=$USE_LLVM_IAS"
-          echo "✅ RUSTC=$RUSTC_BIN"
+          echo "✅ RUSTC_VERSION=$RUSTC_VERSION"
+          echo "----------------"
 
           export PATH="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$CLANG_PREBUILT_BIN:$PATH"
           export PATH="/usr/lib/ccache:$PATH"
@@ -1088,7 +1113,7 @@ jobs:
             LLVM=1
             ARCH=arm64
             CROSS_COMPILE=aarch64-linux-gnu-
-            RUSTC=$RUSTC_BIN
+            RUSTC=../../prebuilts/rust/linux-x86/$RUSTC_VERSION/bin/rustc
             PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole
             LD=ld.lld
             HOSTLD=ld.lld
